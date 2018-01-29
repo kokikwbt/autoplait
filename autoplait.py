@@ -1,8 +1,9 @@
-import numpy as np
-import copy, math, warnings
+import warnings
 from copy import deepcopy
 
+import numpy as np
 import itertools
+import matplotlib.pyplot as plt
 from progressbar import ProgressBar
 from sklearn.preprocessing import scale
 from hmmlearn import hmm
@@ -19,7 +20,8 @@ LM = 0.1
 # for HMM
 MINK = 1
 MAXK = 8
-N_INFER_ITER_HMM = 1
+N_INFER_ITER_HMM = 5
+MAXBAUMN = 3
 
 global ws
 global X
@@ -93,6 +95,7 @@ def GaussianPDF(mean, var, x):
     if p <= 0.: p = ZERO
     # print(p)
     return p
+
 def pdfL(hmm, kid, x):
     p = 0.
     mean = hmm.means_[kid]
@@ -149,6 +152,9 @@ def _MDLtotal():
 
 def estimateHMM_k(s, k=1):
     X_tmp, lengths = subsequences(s)
+    if len(X_tmp) > MAXBAUMN:
+        X_tmp = X_tmp[:MAXBAUMN]
+        lengths = lengths[:MAXBAUMN]
     X_flat = np.concatenate(X_tmp)
     s.model = hmm.GaussianHMM(
         n_components=k,
@@ -164,7 +170,7 @@ def estimateHMM_k(s, k=1):
     s.delta = len(s.subs) / s.len
 
 def estimateHMM(s):
-    print('estimate HMM...')
+    # print('estimate HMM...')
     s.costT = INF
     optk = MINK
     for k in range(MINK, MAXK):
@@ -198,7 +204,7 @@ def search_aux(st, length, s0, s1):
         Pv[v] += pdfL(m0, v, X[t])
     for j in range(k1):
         Pj[j] = np.log(d0)
-        Pj[j] += np.log(m0.startprob_[j] + ZERO)
+        Pj[j] += np.log(m1.startprob_[j] + ZERO)
         Pj[j] += pdfL(m1, j, X[t])
     # t >= 1
     for t in range(st + 1, st + length):
@@ -216,11 +222,11 @@ def search_aux(st, length, s0, s1):
                 if val > maxPv: maxPv, maxv = val, v
             if maxPj > maxPv:
                 Pu[u] = maxPj
-                Su[u] = copy.deepcopy(Sj[maxj])
+                Su[u] = deepcopy(Sj[maxj])
                 Su[u].append(t)
             else:
                 Pu[u] = maxPv
-                Su[u] = copy.deepcopy(Sv[maxv])
+                Su[u] = deepcopy(Sv[maxv])
         # Pj(t)
         maxv = np.argmax(Pv)
         for i in range(k1):
@@ -235,11 +241,11 @@ def search_aux(st, length, s0, s1):
                 if val > maxPj: maxPj, maxj = val, j
             if maxPv > maxPj:
                 Pu[u] = maxPj
-                Su[u] = copy.deepcopy(Sj[maxj])
+                Su[u] = deepcopy(Sj[maxj])
                 Su[u].append(t)
             else:
                 Pu[u] = maxPv
-                Su[u] = copy.deepcopy(Sv[maxv])
+                Su[u] = deepcopy(Sv[maxv])
         tmp = deepcopy(Pu); Pu = deepcopy(Pv); Pv = deepcopy(tmp)
         tmp = deepcopy(Pi); Pi = deepcopy(Pj); Pj = deepcopy(tmp)
         tmp = deepcopy(Su); Su = deepcopy(Sv); Sv = deepcopy(tmp)
@@ -280,7 +286,7 @@ def cut_point_search(Sx, s0, s1, RM=True):
     return lh
 
 def copy_segments(s0, s1): # from s0 to s1
-    s1.subs = copy.deepcopy(s0.subs)
+    s1.subs = deepcopy(s0.subs)
 
 def select_largest(s):
     loc = np.argmax(np.array(s.subs), axis=0)[1] 
@@ -336,7 +342,8 @@ def _find_centroid(Sx, n_samples, seedlen):
         s1stC, s1lenC = s1.subs[0]
         estimateHMM_k(s0, MINK)
         estimateHMM_k(s1, MINK)
-        # cut_point_search()
+        cut_point_search(Sx, s0, s1)
+        computeLhMDL(s0); computeLhMDL(s1)
         if not len(s0.subs) or not len(s1.subs): continue
         if costMin > s0.costT + s1.costT:
             costMin = s0.costT + s1.costT
@@ -352,8 +359,10 @@ def _find_centroid(Sx, n_samples, seedlen):
     return s0, s1
 
 def regimge_split(Sx):
+    print('RegimeSplit')
     seedlen = int(N * LM)
     s0, s1 = _find_centroid(Sx, NSAMPLE, seedlen)
+    print(s0.subs, '\n', s1.subs)
     opt0, opt1 = Segbox(), Segbox()
     for i in range(INFER_ITER_MAX):
         # select largest
@@ -363,6 +372,7 @@ def regimge_split(Sx):
         estimateHMM(s0); estimateHMM(s1)
         # cut point search
         cut_point_search(Sx, s0, s1)
+        print(s0.subs, '\n', s1.subs)
         computeLhMDL(s0); computeLhMDL(s1)
         if not len(s0.subs) or not len(s1.subs): break
         diff = opt0.costT + opt1.costT
@@ -406,6 +416,7 @@ def autoplait(X):
 if __name__ == '__main__':
 
     X = np.loadtxt('./dat/21_01.amc.4d')
+    X = np.loadtxt('./dat/86_01.amc.4d')
     X = scale(X)
     N, dim  = X.shape
     ws = PlaitWS(X)
@@ -414,3 +425,8 @@ if __name__ == '__main__':
     print('| r | m | costT |')
     print('-----------------')
     result = autoplait(X)
+
+    plt.subplot(211)
+    plt.plot(X)
+    plt.subplot(212)
+    plt.show()
