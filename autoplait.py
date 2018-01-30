@@ -1,4 +1,4 @@
-import warnings
+import time, warnings
 from copy import deepcopy
 
 import numpy as np
@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 from progressbar import ProgressBar
 from sklearn.preprocessing import scale
 from hmmlearn import hmm
+cmap = cm.Set1
+warnings.filterwarnings('ignore')
 
 # hyper parameters
 ZERO = 1.e-10
@@ -24,13 +26,7 @@ MAXK = 8
 N_INFER_ITER_HMM = 1
 MAXBAUMN = 3
 
-global ws
-global X
-global N
-global dim
-
-cmap = cm.Set1
-warnings.filterwarnings('ignore')
+global ws, X, N, dim
 
 class Segbox():
     def __init__(self):
@@ -61,7 +57,6 @@ class Segbox():
                 if ed0 + 1 >= st1:
                     self.subs.pop(i + 1)
                     self.subs[i][1] = ed - st0
-        # print('remove overlap:', self.subs)
         _, self.len = np.sum(np.array(self.subs), axis=0)
 
     def add_segment_ex(self, st, ln):
@@ -70,43 +65,18 @@ class Segbox():
 
 class PlaitWS():
     def __init__(self, X):
-        # self.input = X
         self.n, self.d = X.shape
         self.C = []
         self.Opt = []
         self.costT = 0.
 
 def subsequences(s):
-    subs = s.subs
-    X_list, lengths = [], []
-    for i in range(len(subs)):
-        st, ln = subs[i]
-        X_list.append(X[st:st + ln])
-        lengths.append(ln)
-    # print(X_list)
-    # print(lengths)
+    X_list = [X[st:st + ln] for st, ln in s.subs]
+    lengths = [ln for _, ln in s.subs]
     return X_list, lengths
 
 def log_s(x):
     return 2. * np.log2(x) + 1.
-
-def GaussianPDF(mean, var, x):
-    var = np.fabs(var)
-    p = np.exp(-(x - mean) * (x - mean) / (2 * var)) / np.sqrt(2 * np.pi * var)
-    if p >= 1.: p = ONE
-    if p <= 0.: p = ZERO
-    # print(p)
-    return p
-
-def pdfL(hmm, kid, x):
-    p = 0.
-    mean = hmm.means_[kid]
-    var = np.max(hmm.covars_[kid], axis=0)
-    for i in range(dim):
-        p += np.log(ZERO + GaussianPDF(mean[i], var[i], x[i]))
-    if p < np.log(ZERO):
-        p = np.log(ZERO)
-    return p
 
 def costHMM(k, d):
     return FB * (k + k*k + 2*k*d) + 2.0 * np.log(k) / np.log(2.0) + 1.0
@@ -172,22 +142,30 @@ def estimateHMM_k(s, k=1):
     s.delta = len(s.subs) / s.len
 
 def estimateHMM(s):
-    # print('estimate HMM...')
     s.costT = INF
     optk = MINK
     for k in range(MINK, MAXK):
         prev = s.costT
         estimateHMM_k(s, k)
         computeLhMDL(s)
-        # print(s.costT)
         if s.costT > prev:
             optk = k - 1
             break
     if optk < MINK: optk = MINK
     if optk > MAXK: optk = MAXK
-    # print('opt-k:', optk)
     estimateHMM_k(s, optk)
     computeLhMDL(s)
+
+def pdfL(hmm, kid, x):
+    p = 0.
+    mean = hmm.means_[kid]
+    var = np.max(np.fabs(hmm.covars_[kid]), axis=0)
+    # GaussianPDF
+    p = np.exp(-np.square(x - mean) / (2 * var)) / np.sqrt(2 * np.pi * var)
+    p[p >= 1] = ONE; p[p <= 0] = ZERO
+    p = np.sum(np.log(p + ZERO))
+    if p < np.log(ZERO): p = np.log(ZERO)
+    return p
 
 def search_aux(st, length, s0, s1):
     d0, d1 = s0.delta, s1.delta
@@ -200,28 +178,23 @@ def search_aux(st, length, s0, s1):
     Si, Sj = [[] for _ in range(k1)], [[] for _ in range(k1)]
     # t = 0
     t = st
+    Pv = np.log(d1) + np.log(m0.startprob_ + ZERO)
     for v in range(k0):
-        Pv[v] = np.log(d1)
-        Pv[v] += np.log(m0.startprob_[v] + ZERO)
         Pv[v] += pdfL(m0, v, X[t])
+    Pj = np.log(d0) + np.log(m1.startprob_ + ZERO)
     for j in range(k1):
-        Pj[j] = np.log(d0)
-        Pj[j] += np.log(m1.startprob_[j] + ZERO)
         Pj[j] += pdfL(m1, j, X[t])
+
     # t >= 1
     for t in range(st + 1, st + length):
         # Pu(t)
         maxj = np.argmax(Pj)
         for u in range(k0):
-            maxPj = Pj[maxj] + np.log(d1)
-            maxPj += np.log(m0.startprob_[u] + ZERO)
-            maxPj += pdfL(m0, u, X[t])
-            maxPv, maxv = -INF, -1
+            maxPj = Pj[maxj] + np.log(d1) + np.log(m0.startprob_[u] + ZERO) + pdfL(m0, u, X[t])
+            val = Pv + np.log(1. - d0) + np.log(m0.transmat_[:, u] + ZERO)
             for v in range(k0):
-                val = np.log(1.0 - d0) + Pv[v]
-                val += np.log(m0.transmat_[v][u] + ZERO)
-                val += pdfL(m0, u, X[t])
-                if val > maxPv: maxPv, maxv = val, v
+                val[v] += pdfL(m0, u, X[t])
+            maxPv, maxv = np.max(val), np.argmax(val)
             if maxPj > maxPv:
                 Pu[u] = maxPj
                 Su[u] = deepcopy(Sj[maxj])
@@ -232,15 +205,11 @@ def search_aux(st, length, s0, s1):
         # Pj(t)
         maxv = np.argmax(Pv)
         for i in range(k1):
-            maxPv = Pv[maxv] + np.log(d0)
-            maxPv += np.log(m1.startprob_[i] + ZERO)
-            maxPv += pdfL(m1, i, X[t])
-            maxPj, maxj = -INF, -1
+            maxPv = Pv[maxv] + np.log(d0) + np.log(m1.startprob_[i] + ZERO) + pdfL(m1, i, X[t])
+            val = Pj + np.log(1. - d1) + np.log(m1.transmat_[:, i] + ZERO)
             for j in range(k1):
-                val = np.log(1.0 - d1) + Pj[j]
-                val += np.log(m1.transmat_[j][i] + ZERO)
-                val += pdfL(m1, i, X[t])
-                if val > maxPj: maxPj, maxj = val, j
+                val[j] += pdfL(m1, i, X[t])
+            maxPj, maxj = np.max(val), np.argmax(val)
             if maxPv > maxPj:
                 Pi[i] = maxPv
                 Si[i] = deepcopy(Sv[maxv])
@@ -248,8 +217,8 @@ def search_aux(st, length, s0, s1):
             else:
                 Pi[i] = maxPj
                 Si[i] = deepcopy(Sj[maxj])
-        tmp = deepcopy(Pu); Pu = deepcopy(Pv); Pv = deepcopy(tmp)
-        tmp = deepcopy(Pi); Pi = deepcopy(Pj); Pj = deepcopy(tmp)
+        tmp = np.copy(Pu); Pu = np.copy(Pv); Pv = np.copy(tmp)
+        tmp = np.copy(Pi); Pi = np.copy(Pj); Pj = np.copy(tmp)
         tmp = deepcopy(Su); Su = deepcopy(Sv); Sv = deepcopy(tmp)
         tmp = deepcopy(Si); Si = deepcopy(Sj); Sj = deepcopy(tmp)
     # end for
@@ -337,7 +306,8 @@ def _find_centroid(Sx, n_samples, seedlen):
     u = uniformset(Sx, seedlen, n_samples)
     nsub = len(u.subs)
     costMin = INF
-    for iter1, iter2 in itertools.product(range(nsub), repeat=2):
+    product = itertools.product(range(nsub), repeat=2)
+    for iter1, iter2 in product:
         s0, s1 = uniform_sampling(Sx, seedlen, iter1, iter2, u)
         if not len(s0.subs) or not len(s1.subs): continue
         s0stC, s0lenC = s0.subs[0]
@@ -345,7 +315,6 @@ def _find_centroid(Sx, n_samples, seedlen):
         estimateHMM_k(s0, MINK)
         estimateHMM_k(s1, MINK)
         cut_point_search(Sx, s0, s1)
-
         computeLhMDL(s0); computeLhMDL(s1)
         if not len(s0.subs) or not len(s1.subs): continue
         if costMin > s0.costT + s1.costT:
@@ -362,10 +331,8 @@ def _find_centroid(Sx, n_samples, seedlen):
     return s0, s1
 
 def regimge_split(Sx):
-    # print('split...')
     seedlen = int(N * LM)
     s0, s1 = _find_centroid(Sx, NSAMPLE, seedlen)
-    # print(s0.subs, '\n', s1.subs)
     opt0, opt1 = Segbox(), Segbox()
     for i in range(INFER_ITER_MAX):
         # select largest
@@ -375,7 +342,6 @@ def regimge_split(Sx):
         estimateHMM(s0); estimateHMM(s1)
         # cut point search
         cut_point_search(Sx, s0, s1)
-        # print(s0.subs, '\n', s1.subs)
         computeLhMDL(s0); computeLhMDL(s1)
         if not len(s0.subs) or not len(s1.subs): break
         diff = opt0.costT + opt1.costT
@@ -391,7 +357,6 @@ def regimge_split(Sx):
         return s0, s1
     estimateHMM(s0); estimateHMM(s1)
     return s0, s1
-
 
 def autoplait(X):
     # set initial segment
@@ -427,14 +392,16 @@ if __name__ == '__main__':
     print('+---+---+-------+')
     print('| r | m | costT |')
     print('+---+---+-------+')
+    start = time.time()
     result = autoplait(X)
-
+    elapsed_time = time.time() - start
+    print('elapsed_time:{0}'.format(elapsed_time), '[sec]')
     plt.subplot(211)
     plt.plot(X)
     plt.subplot(212)
+
     for r in range(len(ws.Opt)):
         for i in range(len(ws.Opt[r].subs)):
             st, ln = ws.Opt[r].subs[i]
-            print(st, st+ln)
             plt.plot([st, st+ln], [r, r], color=cmap(r))
-    plt.show()
+    plt.savefig('./result.png')
