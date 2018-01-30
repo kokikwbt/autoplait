@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import numpy as np
 import itertools
+import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 from progressbar import ProgressBar
 from sklearn.preprocessing import scale
@@ -20,7 +21,7 @@ LM = 0.1
 # for HMM
 MINK = 1
 MAXK = 8
-N_INFER_ITER_HMM = 5
+N_INFER_ITER_HMM = 1
 MAXBAUMN = 3
 
 global ws
@@ -28,6 +29,7 @@ global X
 global N
 global dim
 
+cmap = cm.Set1
 warnings.filterwarnings('ignore')
 
 class Segbox():
@@ -240,12 +242,12 @@ def search_aux(st, length, s0, s1):
                 val += pdfL(m1, i, X[t])
                 if val > maxPj: maxPj, maxj = val, j
             if maxPv > maxPj:
-                Pu[u] = maxPj
-                Su[u] = deepcopy(Sj[maxj])
-                Su[u].append(t)
+                Pi[i] = maxPv
+                Si[i] = deepcopy(Sv[maxv])
+                Si[i].append(t)
             else:
-                Pu[u] = maxPv
-                Su[u] = deepcopy(Sv[maxv])
+                Pi[i] = maxPj
+                Si[i] = deepcopy(Sj[maxj])
         tmp = deepcopy(Pu); Pu = deepcopy(Pv); Pv = deepcopy(tmp)
         tmp = deepcopy(Pi); Pi = deepcopy(Pj); Pj = deepcopy(tmp)
         tmp = deepcopy(Su); Su = deepcopy(Sv); Sv = deepcopy(tmp)
@@ -343,6 +345,7 @@ def _find_centroid(Sx, n_samples, seedlen):
         estimateHMM_k(s0, MINK)
         estimateHMM_k(s1, MINK)
         cut_point_search(Sx, s0, s1)
+
         computeLhMDL(s0); computeLhMDL(s1)
         if not len(s0.subs) or not len(s1.subs): continue
         if costMin > s0.costT + s1.costT:
@@ -359,10 +362,10 @@ def _find_centroid(Sx, n_samples, seedlen):
     return s0, s1
 
 def regimge_split(Sx):
-    print('RegimeSplit')
+    # print('split...')
     seedlen = int(N * LM)
     s0, s1 = _find_centroid(Sx, NSAMPLE, seedlen)
-    print(s0.subs, '\n', s1.subs)
+    # print(s0.subs, '\n', s1.subs)
     opt0, opt1 = Segbox(), Segbox()
     for i in range(INFER_ITER_MAX):
         # select largest
@@ -372,7 +375,7 @@ def regimge_split(Sx):
         estimateHMM(s0); estimateHMM(s1)
         # cut point search
         cut_point_search(Sx, s0, s1)
-        print(s0.subs, '\n', s1.subs)
+        # print(s0.subs, '\n', s1.subs)
         computeLhMDL(s0); computeLhMDL(s1)
         if not len(s0.subs) or not len(s1.subs): break
         diff = opt0.costT + opt1.costT
@@ -404,7 +407,7 @@ def autoplait(X):
         # try to split regime: s0, s1
         s0, s1 = regimge_split(Sx)
         costT_s01 = s0.costT + s1.costT
-        print(costT_s01 + Sx.costT*REGIME_R, 'vs', Sx.costT)
+        # print(costT_s01 + Sx.costT*REGIME_R, 'vs', Sx.costT)
         if costT_s01 + Sx.costT*REGIME_R < Sx.costT:
             ws.C.append(s0)
             ws.C.append(s1)
@@ -416,17 +419,22 @@ def autoplait(X):
 if __name__ == '__main__':
 
     X = np.loadtxt('./dat/21_01.amc.4d')
-    X = np.loadtxt('./dat/86_01.amc.4d')
+    # X = np.loadtxt('./dat/86_01.amc.4d')
     X = scale(X)
     N, dim  = X.shape
     ws = PlaitWS(X)
 
-    print('-----------------')
+    print('+---+---+-------+')
     print('| r | m | costT |')
-    print('-----------------')
+    print('+---+---+-------+')
     result = autoplait(X)
 
     plt.subplot(211)
     plt.plot(X)
     plt.subplot(212)
+    for r in range(len(ws.Opt)):
+        for i in range(len(ws.Opt[r].subs)):
+            st, ln = ws.Opt[r].subs[i]
+            print(st, st+ln)
+            plt.plot([st, st+ln], [r, r], color=cmap(r))
     plt.show()
