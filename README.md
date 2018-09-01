@@ -1,2 +1,2 @@
-# autoplait
-練習
+# AutoPlait
+Automatic Mining of Co-evolving Time Sequences
