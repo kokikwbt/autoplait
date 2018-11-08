@@ -1,15 +1,18 @@
 import time
-from copy import deepcopy
-from itertools import combinations
-from warnings import filterwarnings
 import numpy as np
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
+import pprint
+from copy import deepcopy
+from itertools import combinations
+from warnings import filterwarnings
 from sklearn.preprocessing import normalize, scale
 from sklearn.mixture import log_multivariate_normal_density
 from hmmlearn.hmm import GaussianHMM
+from tqdm import tqdm
 from joblib import Parallel, delayed
-
+filterwarnings('ignore')
+pp = pprint.PrettyPrinter(indent=4)
 cmap = cm.Set1
 ZERO = 0 #1.e-10
 INF = 1.e+10
@@ -18,15 +21,17 @@ MAXK = 16
 N_INFER_ITER_HMM = 1
 INFER_ITER_MIN = 2
 INFER_ITER_MAX = 10
-SEGMENT_R = 1.e-2
-REGIME_R = 1.e-2
-# MAXBAUMN = 1000
-FB = 4 * 8
+MAXSEG = 100
+SEGMENT_R = 3.e-2
+REGIME_R = 3.e-2
+MAXBAUMN = 10
+FB = 8 * 8
+RM = True
 LM = .1
 NSAMPLE = 10
-filterwarnings('ignore')
+parallel = False
 
-class AutoPlait():
+class AutoPlait(object):
     def __init__(self):
         self.costT = np.inf
         self.regimes = []
@@ -34,25 +39,30 @@ class AutoPlait():
     def solver(self, X):
         self.X = X
         self.n, self.d = _shape(X)
-        reg = Regime(_shape(X)[0])
+        reg = Regime()
         reg.add_segment(0, self.n)
         _estimate_hmm(X, reg)
-        candidate = [reg]
+        candidates = [reg]
 
         while True:
-            self.costT = _mdl_total(self.regimes, candidate)
-            reg = candidate.pop()
+            self.costT = _mdl_total(self.regimes, candidates)
+            reg = candidates.pop()
+
             # try to split regime: s0, s1
             reg0, reg1 = regime_split(X, reg)
+            # print(reg0.subs[:reg0.n_seg], '0')
+            # print(reg1.subs[:reg1.n_seg], '1')
             costT_s01 = reg0.costT + reg1.costT + REGIME_R * reg.costT
             print(f'\t-- try to split: {costT_s01:.6} vs {reg.costT:.6}')
             # print(s0.costT, s1.costT)
+
             if costT_s01 < reg.costT:
-                candidate.append(reg0)
-                candidate.append(reg1)
+                candidates.append(reg0)
+                candidates.append(reg1)
             else:
                 self.regimes.append(reg)
-            if not candidate: break
+            if not candidates:
+                break
 
     def save(self):
         plt.subplot(211)
@@ -60,8 +70,9 @@ class AutoPlait():
         plt.ylabel('Value')
         plt.subplot(212)
         for r in range(len(self.regimes)):
-            for i in range(len(self.regimes[r].sub)):
-                st, dt = self.regimes[r].sub[i]
+            print(self.regimes[r].subs[:self.regimes[r].n_seg], r)
+            for i in range(self.regimes[r].n_seg):
+                st, dt = self.regimes[r].subs[i]
                 plt.plot([st, st + dt - 1], [r, r], color=cmap(r))
         plt.xlabel('Time')
         plt.ylabel('Regime ID')
@@ -71,40 +82,45 @@ class AutoPlait():
 
 def _mdl_total(stack0, stack1):
     r = len(stack0) + len(stack1)
-    m = sum([regime.n_seg() for regime in stack0])
-    m += sum([regime.n_seg() for regime in stack1])
+    m = sum([regime.n_seg for regime in stack0])
+    m += sum([regime.n_seg for regime in stack1])
     costT = MDLsegment(stack0) + MDLsegment(stack1)
     costT += log_s(r) + log_s(m) + m * np.log2(r) + FB * r ** 2
-    print(f'[r, m, total_cost] = {r}, {m}, {costT:.6}')
+    # print(f'[r, m, total_cost] = {r}, {m}, {costT:.6}')
+    print('====================')
+    print(' r:\t', r)
+    print(' m:\t', m)
+    print(f' costT:\t{costT:.6}')
+    print('====================')
     return costT
 
 def regime_split(X, sx):
-    opt0, opt1 = Regime(_shape(X)[0]), Regime(_shape(X)[0])
+    opt0, opt1 = Regime(), Regime()
     n, d = _shape(X)
     seedlen = int(n * LM)
     s0, s1 = _find_centroid(X, sx, NSAMPLE, seedlen)
-    if not s0.n_seg() or not s1.n_seg():
+    if not s0.n_seg or not s1.n_seg:
         return opt0, opt1
-    for i in range(INFER_ITER_MAX):
+    for i in tqdm(list(range(INFER_ITER_MAX)), desc='RegimeSplit'):
         select_largest(s0)
         select_largest(s1)
         _estimate_hmm(X, s0)
         _estimate_hmm(X, s1)
-        cut_point_search(X, sx, s0, s1)
-        _compute_lh_mdl(X, s0)
-        _compute_lh_mdl(X, s1)
-        print(s0.sub)
-        print(s1.sub)
-        if not s0.n_seg() or not s1.n_seg(): break
+        cut_point_search(X, sx, s0, s1, RM=RM)
+        if not s0.n_seg or not s1.n_seg:
+            print("===> early optimized")
+            break
         diff = (opt0.costT + opt1.costT) - (s0.costT + s1.costT)
         if diff > 0:
             copy_segments(s0, opt0)
             copy_segments(s1, opt1)
-        elif i >= INFER_ITER_MIN: break
+        elif i >= INFER_ITER_MIN:
+            print("===> early optimized")
+            break
     copy_segments(opt0, s0)
     copy_segments(opt1, s1)
     del opt0, opt1
-    if not s0.n_seg() or not s1.n_seg():
+    if not s0.n_seg or not s1.n_seg:
         return s0, s1
     _estimate_hmm(X, s0)
     _estimate_hmm(X, s1)
@@ -123,19 +139,19 @@ def _search_aux(X, st, dt, s0, s1):
     t = st
     Pv = np.log(d1) + np.log(m0.startprob_ + ZERO)
     for v in range(k0):
-        Pv[v] += gaussian_pdfl(m0, v, X[t])
+        Pv[v] += gaussian_pdfl(X[t], m0.means_[v], m0.covars_[v])
     Pj = np.log(d0) + np.log(m1.startprob_ + ZERO)
     for j in range(k1):
-        Pj[j] += gaussian_pdfl(m1, j, X[t])
+        Pj[j] += gaussian_pdfl(X[t], m0.means_[v], m0.covars_[v])
 
     for t in range(st + 1, st + dt):
         # Pu(t)
         maxj = np.argmax(Pj)
         for u in range(k0):
-            maxPj = Pj[maxj] + np.log(d1) + np.log(m0.startprob_[u] + ZERO) + gaussian_pdfl(m0, u, X[t])
+            maxPj = Pj[maxj] + np.log(d1) + np.log(m0.startprob_[u] + ZERO) + gaussian_pdfl(X[t], m0.means_[u], m0.covars_[u])
             val = Pv + np.log(1. - d0) + np.log(m0.transmat_[:, u] + ZERO)
             for v in range(k0):
-                val[v] += gaussian_pdfl(m0, u, X[t])
+                val[v] += gaussian_pdfl(X[t], m0.means_[u], m0.covars_[u])
             maxPv, maxv = np.max(val), np.argmax(val)
             if maxPj > maxPv:
                 Pu[u] = maxPj
@@ -147,10 +163,10 @@ def _search_aux(X, st, dt, s0, s1):
         # Pj(t)
         maxv = np.argmax(Pv)
         for i in range(k1):
-            maxPv = Pv[maxv] + np.log(d0) + np.log(m1.startprob_[i] + ZERO) + gaussian_pdfl(m1, i, X[t])
+            maxPv = Pv[maxv] + np.log(d0) + np.log(m1.startprob_[i] + ZERO) + gaussian_pdfl(X[t], m1.means_[i], m1.covars_[i])
             val = Pj + np.log(1. - d1) + np.log(m1.transmat_[:, i] + ZERO)
             for j in range(k1):
-                val[j] += gaussian_pdfl(m1, i, X[t])
+                val[j] += gaussian_pdfl(X[t], m1.means_[i], m1.covars_[i])
             maxPj, maxj = np.max(val), np.argmax(val)
             if maxPv > maxPj:
                 Pi[i] = maxPv
@@ -187,76 +203,75 @@ def _search_aux(X, st, dt, s0, s1):
         s0.add_segment(curst, st + dt - curst)
     else:
         s1.add_segment(curst, st + dt - curst)
+    # print(path)
+    # print('s0', s0.subs[:s0.n_seg])
+    # print('s1', s1.subs[:s1.n_seg])
     return -llh / np.log(2.)  # data coding cost
 
-def cut_point_search(X, sx, s0, s1, remove=True):
-    s0.sub.clear()
-    s1.sub.clear()
+def cut_point_search(X, sx, s0, s1, RM=True):
+    s0.initialize()
+    s1.initialize()
     lh = 0.
-    for i in range(sx.n_seg()):
-        lh += _search_aux(X, sx.sub[i][0], sx.sub[i][1], s0, s1)
-    if remove: remove_noise(X, sx, s0, s1)
+    for i in range(sx.n_seg):
+        lh += _search_aux(X, sx.subs[i, 0], sx.subs[i, 1], s0, s1)
+    if RM: remove_noise(X, sx, s0, s1)
+    _compute_lh_mdl(X, s0)
+    _compute_lh_mdl(X, s1)
     return lh
 
 def _mdl(regime):
-    m = regime.n_seg()
+    m = regime.n_seg
     k = regime.model.n_components
     d = regime.model.n_features
     costT = costLen = 0.
     costC = regime.costC
     costM = costHMM(k, d)
     for i in range(m):
-        costLen += np.log2(regime.sub[i][1])
+        costLen += np.log2(regime.subs[i, 1])
     costLen += m * np.log2(k)
     return costC + costM + costLen
 
 def _viterbi(X, hmm, delta):
     if not 0 <= delta <= 1:
         exit('not appropriate delta')
-    llh = hmm.score(X) + np.log(delta) + np.log(1. - delta)
-    return -llh / np.log(2.)  # data coding cost
+    # print(hmm.startprob_)
+    llh = hmm.score(X) + np.log(delta) + np.log(1 - delta)
+    return -llh / np.log(2)  # data coding cost
 
 def _compute_lh_mdl(X, regime):
-    if regime.n_seg() == 0:
+    if regime.n_seg == 0:
         regime.costT = regime.costC = np.inf
         return
     regime.costC = 0.
-    for i in range(regime.n_seg()):
-        st, dt = regime.sub[i]
+    for i in range(regime.n_seg):
+        st, dt = regime.subs[i]
         regime.costC += _viterbi(X[st:st+dt], regime.model, regime.delta)
     regime.costT = _mdl(regime)
 
 def _shape(X):
-    if np.ndim(X) > 1:
-        n_sample, n_dim = X.shape
-    else:
-        n_sample, n_dim = len(X), 1
-    return n_sample, n_dim
+    return X.shape if X.ndim > 1 else (len(X), 1)
 
 def _parse_input(X, regime):
-    inputs = [X[st:st+dt] for st, dt in regime.sub]
-    lengths = [dt for _, dt in regime.sub]
-    return np.concatenate(inputs), lengths
+    n_seg = regime.n_seg
+    if n_seg == 1:
+        st, dt = regime.subs[0]
+        return X[st:st+dt, :], [dt]
+    n_seg = MAXBAUMN if n_seg > MAXBAUMN else n_seg
+    subss = []
+    lengths = []
+    for st, dt in regime.subs[:n_seg]:
+        subss.append(X[st:st+dt, :])
+        lengths.append(dt)
+    subss = np.concatenate(subss)
+    return subss, lengths
 
 def _estimate_hmm_k(X, regime, k=1):
-    # lengths = [l for _, l in regime.sub]
-    # idx = np.argsort(lengths)[::-1]  #
-    # print('n_seg',regime.n_seg())
-    # print(regime.sub)
-    # if regime.n_seg() > MAXBAUMN:
-    #     idx = idx[:MAXBAUMN]
-    #     lengths = lengths[idx]
-    # _X = [X[regime.sub[i][0]:regime.sub[i][0]+regime.sub[i][1]] for i in idx]
-    # _X = np.concatenate(_X)
-    # print('total length', np.sum(lengths))
-    # print('# of samples', len(_X))
-    _X, lengths = _parse_input(X, regime)
-    # print(X.shape)
-    # print(lengths)
-    regime.model = GaussianHMM(n_components=k, covariance_type='diag',
+    X_, lengths = _parse_input(X, regime)
+    regime.model = GaussianHMM(n_components=k,
+                               covariance_type='diag',
                                n_iter=N_INFER_ITER_HMM)
-    regime.model.fit(_X, lengths=lengths)
-    regime.delta = regime.n_seg() / regime.len
+    regime.model.fit(X_, lengths=lengths)
+    regime.delta = regime.n_seg / regime.len
 
 def _estimate_hmm(X, regime):
     regime.costT = np.inf
@@ -273,47 +288,74 @@ def _estimate_hmm(X, regime):
     _estimate_hmm_k(X, regime, opt_k)
     _compute_lh_mdl(X, regime)
 
-class Regime():
-    def __init__(self, end):
-        self.sub = []
-        self.len = 0
-        self.costT = np.inf
-        self.costC = np.inf
+class Regime(object):
+    def __init__(self):
+        self.subs = np.zeros((MAXSEG, 2), dtype=np.int16)
         self.model = None
         self.delta = 1.
-        self.end = end
-        # self.n_seg() = 0
+        self.initialize()
 
-    def n_seg(self):
-        return len(self.sub)
+    def initialize(self):
+        self.len = 0
+        self.n_seg = 0
+        self.costC = np.inf
+        self.costT = np.inf
 
-    def add_segment(self, st, ln):
-        if ln <= 0: return
-        if st < 0: st = 0
-        loc = 0
-        for i in range(len(self.sub)):
-            if self.sub[i][0] > st: break
-            else: loc += 1
-        self.sub.insert(loc, [st, ln])
-        # remove overlap
-        curr = INF
-        while curr > len(self.sub):
-            curr = len(self.sub)
-            for i in range(curr - 1):
-                st0, ln0 = self.sub[i]
-                st1, ln1 = self.sub[i+1]
-                ed0, ed1 = st0 + ln0, st1 + ln1
-                ed = ed0 if ed0 > ed1 else ed1
-                if ed0 + 1 >= st1:
-                    self.sub.pop(i + 1)
-                    self.sub[i][1] = ed - st0
+    def add_segment(self, st, dt):
+        if dt <= 0: return
+        st = 0 if st < 0 else st
+        n_seg = self.n_seg
+        if n_seg == MAXSEG:
+            raise ValueError(" ")
+        elif n_seg == 0:
+            self.subs[0, :] = (st, dt)
+            self.n_seg += 1
+            self.len = dt
+            self.delta = 1 / dt
+        else:
+            loc = 0
+            while loc < n_seg:
+                if st < self.subs[loc, 0]:
                     break
-        _, self.len = np.sum(np.array(self.sub), axis=0)
-        self.delta = self.n_seg() / self.len
+                loc += 1
+            self.subs[loc+1:n_seg+1, :] = self.subs[loc:n_seg, :]
+            self.subs[loc, :] = (st, dt)
+            n_seg += 1
+            # remove overlap
+            curr = np.inf
+            while curr > n_seg:
+                curr = n_seg
+                for i in range(curr - 1):
+                    st0, dt0 = self.subs[i]
+                    st1, dt1 = self.subs[i + 1]
+                    ed0, ed1 = (st0 + dt0), (st1 + dt1)
+                    ed = ed0 if ed0 > ed1 else ed1
+                    if ed0 > st1:
+                        # print('remove overlap !!', self.subs[:self.n_seg])
+                        # time.sleep(5)
+                        # self.subs.pop(i + 1)
+                        self.subs[i+1:-1, :] = self.subs[i+2:, :]  # pop subs[i]
+                        self.subs[i, 1] = ed - st0
+                        n_seg -= 1
+                        break
+            self.n_seg = n_seg
+            self.len = sum(self.subs[:n_seg, 1])
+            self.delta = self.n_seg / self.len
+            # print(self.subs[:self.n_seg])
 
-    def add_segment_ex(self, st, ln):
-        self.len += ln
-        self.sub.append((st, ln))
+    def add_segment_ex(self, st, dt):
+        self.subs[self.n_seg, :] = (st, dt)
+        self.n_seg += 1
+        self.len += dt
+        self.delta = self.n_seg / self.len
+
+    def del_segment(self, loc):
+        seg = self.subs[loc]
+        self.subs[loc:-1, :] = self.subs[loc+1:, :]  # pop subs[i]
+        self.n_seg -= 1
+        self.len -= seg[1]
+        self.delta = self.n_seg / self.len if self.len > 0 else ZERO
+        return seg
 
 def log_s(x):
     return 2. * np.log2(x) + 1.
@@ -324,26 +366,24 @@ def costHMM(k, d):
 def MDLsegment(stack):
     return np.sum([regime.costT for regime in stack])
 
-def gaussian_pdfl(hmm, state_id, x):
-    mean = hmm.means_[state_id]
-    covar = np.diag(hmm.covars_[state_id])
+def gaussian_pdfl(x, means, covars):
     n_dim = len(x)
-    # x = np.expand_dims(x, 0)
-    means = hmm.means_[0]
-    covars = np.diag(hmm.covars_[0])
-    return -.5 * (n_dim * np.log(2 * np.pi) + np.sum(np.log(covars))
+    covars = np.diag(covars)
+    lpr = -.5 * (n_dim * np.log(2 * np.pi) + np.sum(np.log(covars))
                   + np.sum((means ** 2) / covars)
                   - 2 * np.dot(x, (means / covars).T)
                   + np.dot(x ** 2, (1. / covars).T))
+    # print('lpr', lpr)
+    return lpr
 
 def find_mindiff(X, s0, s1):
     cost = np.inf
     loc = -1
-    for i in range(len(s0.sub)):
-        st, dt = s0.sub[i]
+    for i in range(s0.n_seg):
+        st, dt = s0.subs[i]
         costC0 = _viterbi(X[st:st+dt], s0.model, s0.delta)
         costC1 = _viterbi(X[st:st+dt], s1.model, s1.delta)
-        diff = costC1 - costC0
+        diff = abs(costC1 - costC0)
         if cost > diff:
             loc, cost = i, diff
     return loc, cost
@@ -351,111 +391,128 @@ def find_mindiff(X, s0, s1):
 def scan_mindiff(X, Sx, s0, s1):
     loc0, _ = find_mindiff(X, s0, s1)
     loc1, _ = find_mindiff(X, s1, s0)
-    if loc0 == -1 or loc1 == -1: return INF
-    tmp0 = Regime(_shape(X)[0])
-    tmp1 = Regime(_shape(X)[0])
-    st, ln = s0.sub[loc0]
+    # print(s0.subs[loc0], s1.subs[loc1])
+    if (loc0 == -1 or loc1 == -1
+        or s0.subs[loc0, 1] < 2
+        or s1.subs[loc1, 1] < 2):
+        return np.inf
+    tmp0 = Regime()
+    tmp1 = Regime()
+    st, ln = s0.subs[loc0]
     tmp0.add_segment(st, ln)
-    st, ln = s1.sub[loc1]
+    st, ln = s1.subs[loc1]
     tmp1.add_segment(st, ln)
     _estimate_hmm_k(X, tmp0, MINK)
     _estimate_hmm_k(X, tmp1, MINK)
-    costC = cut_point_search(X, Sx, tmp0, tmp1, remove=False)
+    costC = cut_point_search(X, Sx, tmp0, tmp1, False)
     del tmp0, tmp1
     return costC
 
 def remove_noise_aux(X, Sx, s0, s1, per):
     if per == 0: return
+    th = per * Sx.costT
     mprev = np.inf
-    th = Sx.costT * per
-    while mprev > len(s0.sub) + len(s1.sub):
-        mprev = len(s0.sub) + len(s1.sub)
+    while mprev > s0.n_seg + s1.n_seg:
+        mprev = s0.n_seg + s1.n_seg
         loc0, diff0 = find_mindiff(X, s0, s1)
         loc1, diff1 = find_mindiff(X, s1, s0)
         cost, idx = (diff0, 0) if diff0 < diff1 else (diff1, 1)
-        if cost >= th: continue
+        if cost >= th:
+            continue
         if idx == 0:
-            st, ln = s0.sub.pop(loc0)
-            s1.add_segment(st, ln)
+            st, dt = s0.del_segment(loc0)
+            s1.add_segment(st, dt)
         else:
-            st, ln = s1.sub.pop(loc1)
-            s0.add_segment(st, ln)
+            st, dt = s1.del_segment(loc1)
+            s0.add_segment(st, dt)
 
 def remove_noise(X, Sx, s0, s1):
-    if s0.n_seg() <= 1 and s1.n_seg() <= 1: return
+    if s0.n_seg <= 1 and s1.n_seg <= 1:
+        return
     per = SEGMENT_R
     remove_noise_aux(X, Sx, s0, s1, per)
     costC = scan_mindiff(X, Sx, s0, s1)
-    opt0 = Regime(_shape(X)[0])
-    opt1 = Regime(_shape(X)[0])
+    opt0 = Regime()
+    opt1 = Regime()
     copy_segments(s0, opt0)
     copy_segments(s1, opt1)
     prev = np.inf
     while per <= SEGMENT_R * 10:
-        if costC >= INF: break
+        if costC >= np.inf:
+            break
         per *= 2
         remove_noise_aux(X, Sx, s0, s1, per)
-        if s0.n_seg() <= 1 or s1.n_seg() <= 1: break
+        if s0.n_seg <= 1 or s1.n_seg <= 1:
+            break
         costC = scan_mindiff(X, Sx, s0, s1)
         if prev > costC:
             copy_segments(s0, opt0)
             copy_segments(s1, opt1)
-        else: break
-        prev = costC
+            prev = costC
+        else:
+            break
     copy_segments(opt0, s0)
     copy_segments(opt1, s1)
+    # _estimate_hmm(X, s0)
+    # _estimate_hmm(X, s1)
     del opt0, opt1
 
 def copy_segments(s0, s1):  # from s0 to s1
-    s1 = deepcopy(s0)
+    s1.subs = deepcopy(s0.subs)
+    s1.n_seg = s0.n_seg
+    s1.len = s0.len
+    s1.costT = s0.costT
+    s1.costC = s1.costC
+    s1.delta = s0.delta
 
 def select_largest(s):
-    loc = np.argmax(np.array(s.sub), axis=0)[1] 
-    st, ln = s.sub[loc]
-    s.sub.clear()
-    s.add_segment(st, ln)
+    loc = np.argmax(s.subs[:, 1])
+    st, dt = s.subs[loc]
+    s.initialize()
+    s.add_segment(st, dt)
 
-def uniformset(Sx, length, trial):
-    u = Regime(_shape(X)[0])
-    slide_w = int((Sx.len - length) / trial)
-    for i in range(len(Sx.sub)):
-        if len(u.sub) >= trial:
+def uniformset(X, Sx, n_samples, seedlen):
+    u = Regime()
+    w = int((Sx.len - seedlen) / n_samples)
+    for i in range(Sx.n_seg):
+        if u.n_seg >= n_samples:
             return u
-        st, ln = Sx.sub[i]
+        st, ln = Sx.subs[i]
         ed = st + ln
-        for j in range(trial):
-            nxt = st + j * slide_w
-            if nxt + length > ed:
-                st = ed - length
+        for j in range(n_samples):
+            nxt = st + j * w
+            if nxt + seedlen > ed:
+                st = ed - seedlen
                 if st < 0: st = 0
-                u.add_segment_ex(st, length)
+                u.add_segment_ex(st, seedlen)
                 break
-            u.add_segment_ex(nxt, length)
+            u.add_segment_ex(nxt, seedlen)
     return u
 
-def fixed_sampling(X, Sx, length):
-    # print('nseg', Sx.n_seg())
-    s0, s1 = Regime(_shape(X)[0]), Regime(_shape(X)[0])
-    loc = 0 % len(Sx.sub)
-    r = Sx.sub[loc][0]
-    if Sx.n_seg() == 1:
-        _len = Sx.sub[0][1]
-        if _len < length:
-            s0.add_segment(r, _len)
-            s1.add_segment(r, _len)
+def fixed_sampling(X, Sx, seedlen):
+    # print('nseg', Sx.n_seg)
+    s0, s1 = Regime(), Regime()
+    loc = 0 % Sx.n_seg
+    r = Sx.subs[loc, 0]
+    if Sx.n_seg == 1:
+        dt = Sx.subs[0, 1]
+        if dt < seedlen:
+            s0.add_segment(r, dt)
+            s1.add_segment(r, dt)
         else:
-            s0.add_segment(r, _len)
-            s1.add_segment(r, _len)
-    s0.add_segment(r, length)
-    loc = 1 % len(Sx.sub)
-    r = Sx.sub[loc][0] + int(Sx.sub[loc][1] / 2)
-    s1.add_segment(r, length)
+            s0.add_segment(r, dt)
+            s1.add_segment(r, dt)
+    s0.add_segment(r, seedlen)
+    loc = 1 % Sx.n_seg
+    r = Sx.subs[loc, 0] + int(Sx.subs[loc, 1] / 2)
+    s1.add_segment(r, seedlen)
     return s0, s1
 
 def uniform_sampling(X, Sx, length, n1, n2, u):
-    s0, s1 = Regime(_shape(X)[0]), Regime(_shape(X)[0])
-    i, j = int(n1 % len(u.sub)), int(n2 % len(u.sub))
-    st0, st1 = u.sub[i][0], u.sub[j][0]
+    s0, s1 = Regime(), Regime()
+    i, j = int(n1 % u.n_seg), int(n2 % u.n_seg)
+    # print(i, j)
+    st0, st1 = u.subs[i, 0], u.subs[j, 0]
     if abs(st0 - st1) < length:
         return s0, s1
     s0.add_segment(st0, length)
@@ -464,51 +521,61 @@ def uniform_sampling(X, Sx, length, n1, n2, u):
 
 def _find_centroid_wrap(X, Sx, seedlen, idx0, idx1, u):
     s0, s1 = uniform_sampling(X, Sx, seedlen, idx0, idx1, u)
-    if not len(s0.sub) or not len(s1.sub):
+    if not s0.n_seg or not s1.n_seg:
         return np.inf, None, None
-    sub0 = deepcopy(s0.sub[0])
-    sub1 = deepcopy(s1.sub[0])
+    subs0 = s0.subs[0]
+    subs1 = s1.subs[0]
     _estimate_hmm_k(X, s0, MINK)
     _estimate_hmm_k(X, s1, MINK)
     cut_point_search(X, Sx, s0, s1, False)
-    if not len(s0.sub) or not len(s1.sub):
+    if not s0.n_seg or not s1.n_seg:
         return np.inf, None, None
-    _compute_lh_mdl(X, s0)
-    _compute_lh_mdl(X, s1)
     costT_s01 = s0.costT + s1.costT
-    return costT_s01, sub0, sub1
+    return costT_s01, subs0, subs1
 
 def _find_centroid(X, Sx, n_samples, seedlen):
-    u = uniformset(Sx, seedlen, n_samples)
-    # print('u', u.sub)
-    n_sub = len(u.sub)
-    result = Parallel(n_jobs=4)(
-        [delayed(_find_centroid_wrap)(X, Sx, seedlen, iter1, iter2, u)
-        for iter1, iter2 in combinations(range(n_sub), 2)])
-    if not result:
+    u = uniformset(X, Sx, n_samples, seedlen)
+    # print(u.subs[:u.n_seg], u.n_seg)
+
+    if parallel is True:
+        results = Parallel(n_jobs=4)(
+            [delayed(_find_centroid_wrap)(X, Sx, seedlen, iter1, iter2, u)
+            for iter1, iter2 in combinations(range(u.n_seg), 2)])
+    else:
+        results = []
+        for iter1, iter2 in tqdm(combinations(range(u.n_seg), 2), desc='SearchCentroid'):
+            results.append(_find_centroid_wrap(X, Sx, seedlen, iter1, iter2, u))
+
+    # pp.pprint(results)
+    if not results:
+        print('fixed sampling')
         s0, s1 = fixed_sampling(X, Sx, seedlen)
         return s0, s1
-    centroid = np.argmin([r[0] for r in result])
-    costMin, seg0, seg1 = result[centroid]
+    centroid = np.argmin([res[0] for res in results])
+    # print(results[centroid])
+    costMin, seg0, seg1 = results[centroid]
     if costMin == np.inf:
         print('!! --- centroid not found')
         # s0, s1 = fixed_sampling(X, Sx, seedlen)
-        # print('fixed_sampling', s0.sub, s1.sub)
-        return Regime(0), Regime(0)
-    s0, s1 = Regime(_shape(X)[0]), Regime(_shape(X)[0])
+        # print('fixed_sampling', s0.subs, s1.subs)
+        return Regime(), Regime()
+    s0, s1 = Regime(), Regime()
     s0.add_segment(seg0[0], seg0[1])
     s1.add_segment(seg1[0], seg1[1])
+    # print(s0.n_seg, s1.n_seg)
+    # time.sleep(3)
     return s0, s1
 
 
 if __name__ == '__main__':
 
-    X = np.loadtxt('./_dat/21_01.amc.4d')
+    X = np.loadtxt('./datasets/21_01.amc.4d')
     X = scale(X)
     ap = AutoPlait()
+
     start = time.time()
     ap.solver(X)
     elapsed_time = time.time() - start
-    print(f'\t-- elapsed time:{elapsed_time:.2} [sec]')
+    print(f'==> elapsed time:{elapsed_time} [sec]')
 
     ap.save()
