@@ -1,35 +1,36 @@
 import time
+from copy import deepcopy
+from itertools import combinations
+from warnings import filterwarnings
 import numpy as np
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import pprint
-from copy import deepcopy
-from itertools import combinations
-from warnings import filterwarnings
-from sklearn.preprocessing import normalize, scale
+from sklearn.preprocessing import scale
 from sklearn.mixture import log_multivariate_normal_density
 from hmmlearn.hmm import GaussianHMM
 from tqdm import tqdm
 from joblib import Parallel, delayed
 filterwarnings('ignore')
-pp = pprint.PrettyPrinter(indent=4)
 cmap = cm.Set1
-ZERO = 0 #1.e-10
+pp = pprint.PrettyPrinter(indent=4)
+parallel = True
+ZERO = 1.e-10
 INF = 1.e+10
 MINK = 1
-MAXK = 16
+MAXK = 8
+MAXSEG = 100
 N_INFER_ITER_HMM = 1
 INFER_ITER_MIN = 2
 INFER_ITER_MAX = 10
-MAXSEG = 100
-SEGMENT_R = 3.e-2
+SEGMENT_R = 1.e-2
 REGIME_R = 3.e-2
-MAXBAUMN = 10
-FB = 8 * 8
-RM = True
+BIAS = 1.e+5
+MAXBAUMN = 3
+FB = 4 * 8
 LM = .1
+RM = True
 NSAMPLE = 10
-parallel = False
 
 class AutoPlait(object):
     def __init__(self):
@@ -101,7 +102,7 @@ def regime_split(X, sx):
     s0, s1 = _find_centroid(X, sx, NSAMPLE, seedlen)
     if not s0.n_seg or not s1.n_seg:
         return opt0, opt1
-    for i in tqdm(list(range(INFER_ITER_MAX)), desc='RegimeSplit'):
+    for i in range(INFER_ITER_MAX):
         select_largest(s0)
         select_largest(s1)
         _estimate_hmm(X, s0)
@@ -247,6 +248,8 @@ def _compute_lh_mdl(X, regime):
         st, dt = regime.subs[i]
         regime.costC += _viterbi(X[st:st+dt], regime.model, regime.delta)
     regime.costT = _mdl(regime)
+    if regime.costT < 0:
+        regime.costT = np.inf  # avoid overfitting
 
 def _shape(X):
     return X.shape if X.ndim > 1 else (len(X), 1)
@@ -331,9 +334,6 @@ class Regime(object):
                     ed0, ed1 = (st0 + dt0), (st1 + dt1)
                     ed = ed0 if ed0 > ed1 else ed1
                     if ed0 > st1:
-                        # print('remove overlap !!', self.subs[:self.n_seg])
-                        # time.sleep(5)
-                        # self.subs.pop(i + 1)
                         self.subs[i+1:-1, :] = self.subs[i+2:, :]  # pop subs[i]
                         self.subs[i, 1] = ed - st0
                         n_seg -= 1
@@ -341,7 +341,6 @@ class Regime(object):
             self.n_seg = n_seg
             self.len = sum(self.subs[:n_seg, 1])
             self.delta = self.n_seg / self.len
-            # print(self.subs[:self.n_seg])
 
     def add_segment_ex(self, st, dt):
         self.subs[self.n_seg, :] = (st, dt)
@@ -361,7 +360,7 @@ def log_s(x):
     return 2. * np.log2(x) + 1.
 
 def costHMM(k, d):
-    return FB * (k + k*k + 2*k*d) + 2. * np.log(k) / np.log(2.) + 1.
+    return FB * (k + k ** 2 + 2 * k * d) + 2. * np.log(k) / np.log(2.) + 1.
 
 def MDLsegment(stack):
     return np.sum([regime.costT for regime in stack])
@@ -373,7 +372,6 @@ def gaussian_pdfl(x, means, covars):
                   + np.sum((means ** 2) / covars)
                   - 2 * np.dot(x, (means / covars).T)
                   + np.dot(x ** 2, (1. / covars).T))
-    # print('lpr', lpr)
     return lpr
 
 def find_mindiff(X, s0, s1):
@@ -576,6 +574,6 @@ if __name__ == '__main__':
     start = time.time()
     ap.solver(X)
     elapsed_time = time.time() - start
-    print(f'==> elapsed time:{elapsed_time} [sec]')
+    print(f'===> elapsed time:{elapsed_time} [sec]')
 
     ap.save()
