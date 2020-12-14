@@ -143,7 +143,7 @@ def _search_aux(X, st, dt, s0, s1):
         Pv[v] += gaussian_pdfl(X[t], m0.means_[v], m0.covars_[v])
     Pj = np.log(d0) + np.log(m1.startprob_ + ZERO)
     for j in range(k1):
-        Pj[j] += gaussian_pdfl(X[t], m0.means_[v], m0.covars_[v])
+        Pj[j] += gaussian_pdfl(X[t], m1.means_[j], m1.covars_[j])
 
     for t in range(st + 1, st + dt):
         # Pu(t)
