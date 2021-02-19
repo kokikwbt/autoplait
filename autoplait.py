@@ -7,7 +7,6 @@ import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import pprint
 from sklearn.preprocessing import scale
-from sklearn.mixture import log_multivariate_normal_density
 from hmmlearn.hmm import GaussianHMM
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -109,14 +108,12 @@ def regime_split(X, sx):
         _estimate_hmm(X, s1)
         cut_point_search(X, sx, s0, s1, RM=RM)
         if not s0.n_seg or not s1.n_seg:
-            print("===> early optimized")
             break
         diff = (opt0.costT + opt1.costT) - (s0.costT + s1.costT)
         if diff > 0:
             copy_segments(s0, opt0)
             copy_segments(s1, opt1)
         elif i >= INFER_ITER_MIN:
-            print("===> early optimized")
             break
     copy_segments(opt0, s0)
     copy_segments(opt1, s1)
@@ -567,7 +564,7 @@ def _find_centroid(X, Sx, n_samples, seedlen):
 
 if __name__ == '__main__':
 
-    X = np.loadtxt('./datasets/21_01.amc.4d')
+    X = np.loadtxt('./_dat/21_01.amc.4d')
     X = scale(X)
     ap = AutoPlait()
 
